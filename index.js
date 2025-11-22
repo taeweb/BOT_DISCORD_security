@@ -14,6 +14,7 @@ app.get('/', (req, res) => {
 app.listen(port, () => {
   console.log(`Example app listening on port ${port}`)
 })
+
 // Log Redis events
 redis.on('connect', () => console.log('[Redis] Connected successfully'));
 redis.on('error', (err) => console.error('[Redis] Redis error:', err));
@@ -34,6 +35,11 @@ const msgHistory = new Map();
 const inviteRegex = /(discord\.gg|discord\.com\/invite)/i;
 const BAD_WORDS = ['badword1','badword2']; // เพิ่มคำหยาบ
 
+// Anti-spam configs
+const SPAM_MESSAGE_LIMIT = 5;       // max messages allowed
+const SPAM_TIME_WINDOW = 10;        // seconds window
+const SPAM_MUTE_DURATION = 60 * 5;  // 5 minutes mute
+
 // Helper functions
 function containsBadWord(text) {
   return BAD_WORDS.some(w => text.toLowerCase().includes(w));
@@ -44,6 +50,38 @@ async function isRateLimited(userId) {
   const cur = await redis.incr(key);
   if (cur === 1) await redis.expire(key, 5); // 5s window
   return cur > 2; // max 2 messages / 5s
+}
+
+async function isSpamming(userId) {
+  const spamKey = `spam:${userId}`;
+  const count = await redis.incr(spamKey);
+  if (count === 1) {
+    await redis.expire(spamKey, SPAM_TIME_WINDOW);
+  }
+  return count > SPAM_MESSAGE_LIMIT;
+}
+
+async function muteUser(guildId, memberId, durationSeconds, reason) {
+  const guild = await client.guilds.fetch(guildId);
+  const member = await guild.members.fetch(memberId).catch(() => null);
+  if (!member) return;
+
+  let muteRole = guild.roles.cache.find(r => r.name === 'Muted');
+  if (!muteRole) {
+    muteRole = await guild.roles.create({
+      name: 'Muted',
+      permissions: [],
+      reason: 'Create mute role for anti-spam',
+    });
+  }
+
+  await member.roles.add(muteRole, reason);
+  console.log(`[Mute] Muted ${member.user.tag} for ${durationSeconds} seconds: ${reason}`);
+
+  setTimeout(async () => {
+    await member.roles.remove(muteRole, 'Mute duration expired');
+    console.log(`[Mute] Unmuted ${member.user.tag} after mute duration`);
+  }, durationSeconds * 1000);
 }
 
 async function takeAction(guildId, memberId, action, reason) {
@@ -72,6 +110,14 @@ client.on('messageCreate', async message => {
   const text = content.trim();
 
   console.log(`[Message] ${author.tag} in ${message.guild?.name || 'DM'}: ${text}`);
+
+  // Anti-spam check
+  if (guildId && await isSpamming(userId)) {
+    await message.delete().catch(() => {});
+    await muteUser(guildId, userId, SPAM_MUTE_DURATION, 'Anti-spam auto mute');
+    console.log(`[Blocked] Spam detected and muted ${author.tag}`);
+    return;
+  }
 
   // 1) Rate limit
   if (await isRateLimited(userId)) {
