@@ -37,7 +37,7 @@ const BAD_WORDS = ['badword1','badword2']; // เพิ่มคำหยาบ
 
 // Anti-spam configs
 const SPAM_MESSAGE_LIMIT = 2;       // max messages allowed
-const SPAM_TIME_WINDOW = 2;        // seconds window
+const SPAM_TIME_WINDOW = 3;        // seconds window
 const SPAM_MUTE_DURATION = 60 * 2;  // 5 minutes mute
 
 // Helper functions
