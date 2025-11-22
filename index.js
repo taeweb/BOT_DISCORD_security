@@ -3,7 +3,17 @@ import { Client, GatewayIntentBits, Partials } from 'discord.js';
 import Redis from 'ioredis';
 
 const redis = new Redis(process.env.REDIS_URL);
+const express = require('express')
+const app = express()
+const port = process.env.PORT || 4000
 
+app.get('/', (req, res) => {
+  res.send('Hello World!')
+})
+
+app.listen(port, () => {
+  console.log(`Example app listening on port ${port}`)
+})
 // Log Redis events
 redis.on('connect', () => console.log('[Redis] Connected successfully'));
 redis.on('error', (err) => console.error('[Redis] Redis error:', err));
