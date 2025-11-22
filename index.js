@@ -1,9 +1,9 @@
 import 'dotenv/config';
 import { Client, GatewayIntentBits, Partials } from 'discord.js';
 import Redis from 'ioredis';
+import express from 'express';
 
 const redis = new Redis(process.env.REDIS_URL);
-const express = require('express')
 const app = express()
 const port = process.env.PORT || 4000
 
