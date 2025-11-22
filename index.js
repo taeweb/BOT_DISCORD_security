@@ -190,4 +190,4 @@ client.on('messageCreate', async message => {
 client.login(process.env.DISCORD_TOKEN_1)
   .then(()=>console.log('[Bot] Login successful'))
   .catch(err=>console.error('[Bot] Login failed:', err));
-if (message.author.bot) return;
+
