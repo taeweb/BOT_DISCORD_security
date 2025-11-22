@@ -103,21 +103,25 @@ client.once('ready', () => {
 
 // Message handler
 client.on('messageCreate', async message => {
-  if (message.author.bot) return;
+  const isBot = message.author.bot;
 
-  const { content, author, guildId, channel, mentions } = message;
+
+  
+  const { content, author, guildId } = message;
   const userId = author.id;
   const text = content.trim();
 
-  console.log(`[Message] ${author.tag} in ${message.guild?.name || 'DM'}: ${text}`);
-
-  // Anti-spam check
+  // ลบข้อความหรือ mute ถ้าเกิน limit ไม่ว่าเป็น bot หรือ user
   if (guildId && await isSpamming(userId)) {
     await message.delete().catch(() => {});
     await muteUser(guildId, userId, SPAM_MUTE_DURATION, 'Anti-spam auto mute');
-    console.log(`[Blocked] Spam detected and muted ${author.tag}`);
+    console.log(`[Blocked] Spam detected and muted ${author.tag} (bot: ${author.bot})`);
     return;
   }
+
+  // สามารถเพิ่มเงื่อนไข rate limit / flood detection สำหรับ bot ด้วย
+
+
 
   // 1) Rate limit
   if (await isRateLimited(userId)) {
@@ -186,3 +190,4 @@ client.on('messageCreate', async message => {
 client.login(process.env.DISCORD_TOKEN_1)
   .then(()=>console.log('[Bot] Login successful'))
   .catch(err=>console.error('[Bot] Login failed:', err));
+if (message.author.bot) return;
