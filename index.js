@@ -1,193 +1,294 @@
 import 'dotenv/config';
-import { Client, GatewayIntentBits, Partials } from 'discord.js';
+import { 
+  Client, 
+  GatewayIntentBits, 
+  Partials,
+  AuditLogEvent 
+} from 'discord.js';
 import Redis from 'ioredis';
 import express from 'express';
 
 const redis = new Redis(process.env.REDIS_URL);
-const app = express()
-const port = process.env.PORT || 4000
 
-app.get('/', (req, res) => {
-  res.send('Hello World!')
-})
+const STAFF_LOG_CHANNEL_ID = process.env.MOD_LOG_CHANNEL;
+const BOT_WHITELIST = process.env.BOT_WHITELIST
+  ? process.env.BOT_WHITELIST.split(",").map(v => v.trim())
+  : [];
 
-app.listen(port, () => {
-  console.log(`Example app listening on port ${port}`)
-})
+let raidMode = false;
 
-// Log Redis events
-redis.on('connect', () => console.log('[Redis] Connected successfully'));
-redis.on('error', (err) => console.error('[Redis] Redis error:', err));
+// -------------------------------
+// Web server
+// -------------------------------
+const app = express();
+const port = process.env.PORT || 4000;
 
-// Create Discord client
+app.get('/', (req, res) => res.send('Hello World!'));
+app.listen(port, () => console.log(`[Web] Running on port ${port}`));
+
+// -------------------------------
+// Discord Client
+// -------------------------------
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMembers
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildModeration,
+    GatewayIntentBits.GuildMessageReactions,
   ],
   partials: [Partials.Channel]
 });
 
-// Message history for duplicate/flood detection
-const msgHistory = new Map();
-const inviteRegex = /(discord\.gg|discord\.com\/invite)/i;
-const BAD_WORDS = ['badword1','badword2']; // เพิ่มคำหยาบ
+// -------------------------------
+// Tools
+// -------------------------------
+function sendLog(guild, title, description, color = 0xff0000) {
+  const ch = guild.channels.cache.get(STAFF_LOG_CHANNEL_ID);
+  if (!ch) return;
+  ch.send({
+    embeds: [{
+      title,
+      description,
+      color,
+      timestamp: new Date()
+    }]
+  }).catch(()=>{});
+}
 
-// Anti-spam configs
-const SPAM_MESSAGE_LIMIT = 2;       // max messages allowed
-const SPAM_TIME_WINDOW = 3;        // seconds window
-const SPAM_MUTE_DURATION = 60 * 2;  // 5 minutes mute
+async function lockGuild(guild) {
+  if (raidMode) return;
+  raidMode = true;
 
-// Helper functions
+  sendLog(guild, "🔒 RAID MODE ENABLED", "Server locked due to RAID attack");
+
+  guild.channels.cache.forEach(async ch => {
+    await ch.permissionOverwrites.edit(guild.roles.everyone, {
+      SendMessages: false
+    }).catch(()=>{});
+  });
+
+  console.log("[RAID] Guild locked");
+}
+
+async function unlockGuild(guild) {
+  if (!raidMode) return;
+  raidMode = false;
+
+  sendLog(guild, "🔓 RAID MODE DISABLED", "Server unlocked");
+
+  guild.channels.cache.forEach(async ch => {
+    await ch.permissionOverwrites.edit(guild.roles.everyone, {
+      SendMessages: null
+    }).catch(()=>{});
+  });
+
+  console.log("[RAID] Guild unlocked");
+}
+
+// -------------------------------
+// Helper Functions
+// -------------------------------
 function containsBadWord(text) {
+  const BAD_WORDS = ['badword1', 'badword2'];
   return BAD_WORDS.some(w => text.toLowerCase().includes(w));
 }
 
 async function isRateLimited(userId) {
   const key = `rl:${userId}`;
   const cur = await redis.incr(key);
-  if (cur === 1) await redis.expire(key, 5); // 5s window
-  return cur > 2; // max 2 messages / 5s
+  if (cur === 1) await redis.expire(key, 5);
+  return cur > 2;
 }
 
 async function isSpamming(userId) {
-  const spamKey = `spam:${userId}`;
-  const count = await redis.incr(spamKey);
-  if (count === 1) {
-    await redis.expire(spamKey, SPAM_TIME_WINDOW);
-  }
-  return count > SPAM_MESSAGE_LIMIT;
+  const key = `spam:${userId}`;
+  const n = await redis.incr(key);
+  if (n === 1) await redis.expire(key, 3);
+  return n > 2;
 }
 
-async function muteUser(guildId, memberId, durationSeconds, reason) {
-  const guild = await client.guilds.fetch(guildId);
-  const member = await guild.members.fetch(memberId).catch(() => null);
-  if (!member) return;
+async function isHardLimit(userId, text) {
+  const words = text.split(/\s+/);
+  if (words.length <= 2) return false;
 
-  let muteRole = guild.roles.cache.find(r => r.name === 'Muted');
-  if (!muteRole) {
-    muteRole = await guild.roles.create({
-      name: 'Muted',
-      permissions: [],
-      reason: 'Create mute role for anti-spam',
-    });
-  }
-
-  await member.roles.add(muteRole, reason);
-  console.log(`[Mute] Muted ${member.user.tag} for ${durationSeconds} seconds: ${reason}`);
-
-  setTimeout(async () => {
-    await member.roles.remove(muteRole, 'Mute duration expired');
-    console.log(`[Mute] Unmuted ${member.user.tag} after mute duration`);
-  }, durationSeconds * 1000);
+  const key = `hard:${userId}`;
+  const n = await redis.incr(key);
+  if (n === 1) await redis.expire(key, 3);
+  return true;
 }
 
-async function takeAction(guildId, memberId, action, reason) {
+async function muteUser(guildId, memberId, seconds, reason) {
   const guild = await client.guilds.fetch(guildId);
   const member = await guild.members.fetch(memberId).catch(()=>null);
   if (!member) return;
-  if (action === 'mute') {
-    let role = guild.roles.cache.find(r => r.name === 'Muted');
-    if (!role) role = await guild.roles.create({ name: 'Muted', permissions: [] });
-    await member.roles.add(role, reason);
+
+  let muteRole = guild.roles.cache.find(r => r.name === "Muted");
+  if (!muteRole) {
+    muteRole = await guild.roles.create({
+      name: "Muted",
+      permissions: []
+    }).catch(()=>{});
   }
+
+  await member.roles.add(muteRole, reason).catch(()=>{});
+  setTimeout(() => {
+    member.roles.remove(muteRole, "Mute expired").catch(()=>{});
+  }, seconds * 1000);
 }
 
-// Bot ready log
-client.once('ready', () => {
-  console.log(`[Bot] Logged in as ${client.user.tag}`);
-  console.log(`[Bot] Watching ${client.guilds.cache.size} guild(s)`);
+// -------------------------------
+// Anti-Nuke (ตรวจทุกคน, ไม่เช็ค ownerId)
+// -------------------------------
+const ANTI_NUKE_LIMIT = 2; // ครั้งที่อนุญาตก่อน BAN
+
+client.on("guildAuditLogEntryCreate", async (entry) => {
+  const guild = entry.guild;
+  const exe = entry.executor;
+  if (!exe || !guild) return; // เช็คก่อนใช้งาน
+
+  const forbidden = [
+    AuditLogEvent.ChannelDelete,
+    AuditLogEvent.RoleDelete,
+    AuditLogEvent.MemberKick,
+    AuditLogEvent.MemberBanAdd
+  ];
+
+  if (!forbidden.includes(entry.action)) return;
+
+  const key = `anti_nuke:${guild.id}:${exe.id}`;
+  const n = await redis.incr(key);
+  if (n === 1) await redis.expire(key, 3600); // reset 1 ชั่วโมง
+
+  if (n > ANTI_NUKE_LIMIT) {
+    // BAN user
+    await guild.members.ban(exe.id, { reason: "Anti-Nuke limit exceeded" }).catch(()=>{});
+    sendLog(guild, "🚨 ANTI-NUKE BAN", `${exe.tag} ทำผิดเกินจำนวนครั้งที่อนุญาต`);
+  } else {
+    sendLog(guild, "⚠ ANTI-NUKE Warning", `${exe.tag} ทำผิด Anti-Nuke ครั้งที่ ${n}`);
+  }
 });
 
-// Message handler
-client.on('messageCreate', async message => {
-  const isBot = message.author.bot;
+// -------------------------------
+// On Bot Ready
+// -------------------------------
+client.on("clientReady", () => {
+  console.log(`[Bot] Logged in as ${client.user.tag}`);
+});
 
+// -------------------------------
+// Message Handler
+// -------------------------------
+const msgHistory = new Map();
+const inviteRegex = /(discord\.gg|discord\.com\/invite)/i;
 
-  
-  const { content, author, guildId } = message;
+client.on("messageCreate", async message => {
+  const guild = message.guild;
+  if (!guild) return;
+
+  const { content, author } = message;
   const userId = author.id;
   const text = content.trim();
+  const mentions = message.mentions;
 
-  // ลบข้อความหรือ mute ถ้าเกิน limit ไม่ว่าเป็น bot หรือ user
-  if (guildId && await isSpamming(userId)) {
-    await message.delete().catch(() => {});
-    await muteUser(guildId, userId, SPAM_MUTE_DURATION, 'Anti-spam auto mute');
-    console.log(`[Blocked] Spam detected and muted ${author.tag} (bot: ${author.bot})`);
+  // RAID BURST
+  const key = `burst:${guild.id}`;
+  const burst = await redis.incr(key);
+  if (burst === 1) await redis.expire(key, 3);
+
+  if (burst > 20) {
+    sendLog(guild, "⚠ RAID DETECTED", "Mass message burst detected");
+    await lockGuild(guild);
+    setTimeout(() => unlockGuild(guild), 30000);
+  }
+
+  // BLOCK EXTERNAL BOTS
+  if (author.bot && !BOT_WHITELIST.includes(author.id)) {
+    await message.delete().catch(()=>{});
+    sendLog(guild, "🤖 External Bot Blocked", `${author.tag}`);
     return;
   }
 
-  // สามารถเพิ่มเงื่อนไข rate limit / flood detection สำหรับ bot ด้วย
+  // HARD LIMIT: 2 WORDS / 3 SEC
+  if (await isHardLimit(userId, text)) {
+    await message.delete().catch(()=>{});
+    sendLog(guild, "⌛ Hard Limit Triggered", `${author.tag} sent more than 2 words`);
+    return;
+  }
 
+  // SPAM
+  if (await isSpamming(userId)) {
+    await message.delete().catch(()=>{});
+    await muteUser(guild.id, userId, 120, "Spam");
+    sendLog(guild, "⛔ Spam Blocked", `${author.tag}`);
+    return;
+  }
 
-
-  // 1) Rate limit
+  // RATE LIMIT
   if (await isRateLimited(userId)) {
     await message.delete().catch(()=>{});
-    console.log(`[Blocked] Rate limit ${author.tag}`);
+    sendLog(guild, "📥 Rate Limit", `${author.tag}`);
     return;
   }
 
-  // 2) Bad words
+  // BAD WORDS
   if (containsBadWord(text)) {
     await message.delete().catch(()=>{});
-    console.log(`[Blocked] Bad word ${author.tag}`);
+    sendLog(guild, "🤬 Bad Word", `${author.tag}`);
     return;
   }
 
-  // 3) Invite links
+  // INVITE LINKS
   if (inviteRegex.test(text)) {
     await message.delete().catch(()=>{});
-    console.log(`[Blocked] Invite link ${author.tag}`);
+    sendLog(guild, "🚫 Invite Blocked", `${author.tag}`);
     return;
   }
 
-  // 4) Duplicate message
+  // DUPLICATE
   const now = Date.now();
   const last = msgHistory.get(userId);
+
   if (!last) {
-    msgHistory.set(userId, { lastMsg: text, lastTime: now, count: 1 });
+    msgHistory.set(userId, { lastMsg: text, count: 1 });
   } else {
     if (last.lastMsg === text) last.count++;
     else { last.lastMsg = text; last.count = 1; }
-    last.lastTime = now;
-    msgHistory.set(userId, last);
+
     if (last.count >= 3) {
       await message.delete().catch(()=>{});
-      console.log(`[Blocked] Duplicate ${author.tag}`);
+      sendLog(guild, "📛 Duplicate", `${author.tag}`);
       return;
     }
   }
 
-  // 5) Flood detection (over 6 messages in short time)
+  // FLOOD (> 6 MESSAGES / 3s)
   const floodKey = `flood:${userId}`;
-  const floodCount = await redis.incr(floodKey);
-  if (floodCount === 1) await redis.expire(floodKey, 3);
-  if (floodCount > 6) {
+  const flood = await redis.incr(floodKey);
+  if (flood === 1) await redis.expire(floodKey, 5);
+  if (flood > 3) {
     await message.delete().catch(()=>{});
-    console.log(`[Blocked] Flood ${author.tag}`);
+    sendLog(guild, "🌊 Flood", `${author.tag}`);
     return;
   }
 
-  // 6) Too many mentions
-  if (mentions.users.size > 5) {
+  // MENTION SPAM
+  if (mentions.users.size > 5 || mentions.roles.size > 5) {
     await message.delete().catch(()=>{});
-    console.log(`[Blocked] Too many mentions ${author.tag}`);
+    sendLog(guild, "🔔 Mention Spam", `${author.tag}`);
     return;
   }
 
-  // 7) Too many links
+  // LINK SPAM
   if (/https?:\/\//.test(text) && text.split("http").length > 3) {
     await message.delete().catch(()=>{});
-    console.log(`[Blocked] Too many links ${author.tag}`);
+    sendLog(guild, "🔗 Link Spam", `${author.tag}`);
     return;
   }
 });
 
+// --------------------------------------
 // Login
-client.login(process.env.DISCORD_TOKEN_1)
-  .then(()=>console.log('[Bot] Login successful'))
-  .catch(err=>console.error('[Bot] Login failed:', err));
-
+// --------------------------------------
+client.login(process.env.DISCORD_TOKEN_1);
