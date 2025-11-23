@@ -15,7 +15,6 @@ const BOT_WHITELIST = process.env.BOT_WHITELIST
   ? process.env.BOT_WHITELIST.split(",").map(v => v.trim())
   : [];
 
-
 let raidMode = false;
 
 // -------------------------------
@@ -140,14 +139,14 @@ async function muteUser(guildId, memberId, seconds, reason) {
 }
 
 // -------------------------------
-// Anti-Nuke (ตรวจทุกคน, ไม่เช็ค ownerId)
+// Anti-Nuke
 // -------------------------------
-const ANTI_NUKE_LIMIT = 2; // ครั้งที่อนุญาตก่อน BAN
+const ANTI_NUKE_LIMIT = 2;
 
 client.on("guildAuditLogEntryCreate", async (entry) => {
   const guild = entry.guild;
   const exe = entry.executor;
-  if (!exe || !guild) return; // เช็คก่อนใช้งาน
+  if (!exe || !guild) return;
 
   const forbidden = [
     AuditLogEvent.ChannelDelete,
@@ -160,10 +159,9 @@ client.on("guildAuditLogEntryCreate", async (entry) => {
 
   const key = `anti_nuke:${guild.id}:${exe.id}`;
   const n = await redis.incr(key);
-  if (n === 1) await redis.expire(key, 3600); // reset 1 ชั่วโมง
+  if (n === 1) await redis.expire(key, 3600);
 
   if (n > ANTI_NUKE_LIMIT) {
-    // BAN user
     await guild.members.ban(exe.id, { reason: "Anti-Nuke limit exceeded" }).catch(()=>{});
     sendLog(guild, "🚨 ANTI-NUKE BAN", `${exe.tag} ทำผิดเกินจำนวนครั้งที่อนุญาต`);
   } else {
@@ -174,7 +172,7 @@ client.on("guildAuditLogEntryCreate", async (entry) => {
 // -------------------------------
 // On Bot Ready
 // -------------------------------
-client.on('ClientReady', () => {
+client.on('ready', () => {
   console.log(`[Bot] Logged in as ${client.user.tag}`);
 
   // เพิ่มตัวเองเข้า whitelist หลัง login
@@ -198,6 +196,9 @@ client.on("messageCreate", async message => {
   const text = content.trim();
   const mentions = message.mentions;
 
+  // ถ้า bot อยู่ใน whitelist ให้ข้ามทุกตรวจสอบ
+  if (BOT_WHITELIST.includes(userId)) return;
+
   // RAID BURST
   const key = `burst:${guild.id}`;
   const burst = await redis.incr(key);
@@ -210,13 +211,13 @@ client.on("messageCreate", async message => {
   }
 
   // BLOCK EXTERNAL BOTS
-  if (author.bot && !BOT_WHITELIST.includes(author.id)) {
+  if (author.bot) {
     await message.delete().catch(()=>{});
     sendLog(guild, "🤖 External Bot Blocked", `${author.tag}`);
     return;
   }
 
-  // HARD LIMIT: 2 WORDS / 3 SEC
+  // HARD LIMIT
   if (await isHardLimit(userId, text)) {
     await message.delete().catch(()=>{});
     sendLog(guild, "⌛ Hard Limit Triggered", `${author.tag} sent more than 2 words`);
@@ -253,7 +254,6 @@ client.on("messageCreate", async message => {
   }
 
   // DUPLICATE
-  const now = Date.now();
   const last = msgHistory.get(userId);
 
   if (!last) {
@@ -269,7 +269,7 @@ client.on("messageCreate", async message => {
     }
   }
 
-  // FLOOD (> 6 MESSAGES / 3s)
+  // FLOOD
   const floodKey = `flood:${userId}`;
   const flood = await redis.incr(floodKey);
   if (flood === 1) await redis.expire(floodKey, 5);
