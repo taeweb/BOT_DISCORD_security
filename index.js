@@ -14,6 +14,7 @@ const STAFF_LOG_CHANNEL_ID = process.env.MOD_LOG_CHANNEL;
 const BOT_WHITELIST = process.env.BOT_WHITELIST
   ? process.env.BOT_WHITELIST.split(",").map(v => v.trim())
   : [];
+BOT_WHITELIST.push(client.user.id); // เพิ่ม bot ตัวเอง
 
 let raidMode = false;
 
